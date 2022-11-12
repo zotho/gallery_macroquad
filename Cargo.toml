@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-bench = []
+bench = ["konst"]
 
 [dependencies]
 # macroquad = { version = "0.3.15", default-features = false }
@@ -14,3 +14,5 @@ macroquad = { path = "./macroquad", default-features = false, features = [] }
 flume = "0.10.14"
 
 image = { version = "0.23.12" }
+
+konst = { version = "0.3.2", features = ["parsing", "iter"], optional = true }
