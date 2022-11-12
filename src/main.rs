@@ -1,7 +1,12 @@
-use std::{env::args, path::{PathBuf, Path}, thread::{JoinHandle, Builder}, time::Instant};
+use std::{
+    env::args,
+    path::{Path, PathBuf},
+    thread::{Builder, JoinHandle},
+    time::Instant,
+};
 
-use flume::{Receiver, Sender, TrySendError, TryRecvError};
-use image::{ImageBuffer, Rgba, DynamicImage, ImageError};
+use flume::{Receiver, Sender, TryRecvError, TrySendError};
+use image::{DynamicImage, ImageBuffer, ImageError, Rgba};
 use macroquad::prelude::*;
 
 #[derive(Debug)]
@@ -14,11 +19,12 @@ type Img = ImageBuffer<Rgba<u8>, Vec<u8>>;
 type Data = (Command, String, Img);
 
 fn main() {
-
     let (command_sender, command_receiver) = channel();
     let (data_sender, data_receiver) = channel();
 
-    let backend_handle = spawn_named("backend".to_string(), move || backend(data_sender, command_receiver));
+    let backend_handle = spawn_named("backend".to_string(), move || {
+        backend(data_sender, command_receiver)
+    });
     macroquad::Window::from_config(
         Conf {
             window_title: "Gallery".to_string(),
@@ -37,11 +43,12 @@ fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>) {
     let path = PathBuf::from(args().nth(1).expect("Provide path to image"));
     let mut path = path.as_path();
 
-    // data_sender
-    //     .send((Command::Next, read(path).unwrap()))
-    //     .unwrap();
-
-    let name = path.file_name().unwrap_or_default().to_str().unwrap_or_default().to_string();
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_str()
+        .unwrap_or_default()
+        .to_string();
 
     data_sender
         .send((Command::Next, name, img_from_path(path).unwrap()))
@@ -83,13 +90,21 @@ fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>) {
 
         let mbs = data.as_raw().len() as f64 / 1024.0 / 1024.0;
         let elapsed = start.elapsed().as_secs_f64();
-        println!("{elapsed:7.4} - loading of {mbs:4.1}mb = {:8.4}mb/s", mbs / elapsed);
+        println!(
+            "{elapsed:7.4} - loading of {mbs:4.1}mb = {:8.4}mb/s",
+            mbs / elapsed
+        );
 
-        let name = path.file_name().unwrap_or_default().to_str().unwrap_or_default().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default()
+            .to_string();
 
         match data_sender.try_send((command, name, data)) {
             Err(TrySendError::Disconnected(_)) => break,
-            err => err.unwrap() 
+            err => err.unwrap(),
         }
     }
 }
@@ -143,7 +158,10 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
                     println!("Bench {k}/{BENCH_STEPS}");
                     if k == BENCH_STEPS {
                         let bench_elapsed = bench_start.elapsed().as_secs_f64();
-                        println!("Bench done in {bench_elapsed} s, {} s/image", bench_elapsed / BENCH_STEPS as f64);
+                        println!(
+                            "Bench done in {bench_elapsed} s, {} s/image",
+                            bench_elapsed / BENCH_STEPS as f64
+                        );
                         break;
                     }
                 }
@@ -165,11 +183,11 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
                 //     command_sender.send(prev_command).unwrap();
                 //     // println!("Skip file");
                 // }
-            },
+            }
             Err(TryRecvError::Disconnected) => {
                 break;
-            },
-            _ => {},
+            }
+            _ => {}
         }
 
         clear_background(BLACK);
@@ -189,7 +207,6 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
     }
 }
 
-
 pub trait TryRecvLast<T> {
     fn try_recv_last(&self) -> Result<T, TryRecvError>;
 }
@@ -205,7 +222,7 @@ impl<T> TryRecvLast<T> for Receiver<T> {
                 ok @ Ok(_) => {
                     println!("Overlooping frontend");
                     res = ok
-                },
+                }
                 Err(TryRecvError::Empty) => break res,
                 err => break err,
             }
@@ -223,7 +240,10 @@ where
     F: Send + 'static,
     T: Send + 'static,
 {
-    Builder::new().name(name).spawn(f).expect("failed to spawn thread")
+    Builder::new()
+        .name(name)
+        .spawn(f)
+        .expect("failed to spawn thread")
 }
 
 #[cfg(feature = "bench")]
@@ -289,6 +309,10 @@ pub fn from_file(bytes: &[u8]) -> Option<Texture2D> {
     let res = Some(Texture2D::from_rgba8(width, height, &bytes));
     let elapsed = start.elapsed().as_secs_f64();
 
-    println!("{elapsed:7.4} - from file ({part1:.7}, {:.7}, {:.7})", part2-part1, part3-part2);
+    println!(
+        "{elapsed:7.4} - from file ({part1:.7}, {:.7}, {:.7})",
+        part2 - part1,
+        part3 - part2
+    );
     res
 }
