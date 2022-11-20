@@ -1,13 +1,26 @@
 use std::{
     env::args,
+    fmt,
+    mem::transmute,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     thread::{Builder, JoinHandle},
     time::Instant,
 };
 
 use flume::{Receiver, Sender, TryRecvError, TrySendError};
-use image::{DynamicImage, ImageBuffer, ImageError, Rgba};
+use image::{ImageBuffer, ImageError, Rgba};
 use macroquad::prelude::*;
+
+use nu_ansi_term::{Color, Style};
+use tracing::{instrument, trace, warn, Level};
+use tracing_subscriber::fmt::{format::{Writer, FmtSpan}, time::FormatTime};
+
+#[cfg(feature = "bench")]
+use konst::{primitive::parse_usize, result::unwrap_ctx};
+
+#[cfg(feature = "bench")]
+const BENCH_STEPS: usize = unwrap_ctx!(parse_usize(env!("BENCH_STEPS")));
 
 #[derive(Debug)]
 pub enum Command {
@@ -19,11 +32,23 @@ type Img = ImageBuffer<Rgba<u8>, Vec<u8>>;
 type Data = (Command, String, Img);
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_timer(Difftime::default())
+        .with_span_events(FmtSpan::CLOSE)
+        .with_max_level(Level::TRACE)
+        .init();
+
+    trace!("Starting");
+
     let (command_sender, command_receiver) = channel();
     let (data_sender, data_receiver) = channel();
 
     let backend_handle = spawn_named("backend".to_string(), move || {
-        backend(data_sender, command_receiver)
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { backend(data_sender, command_receiver).await });
     });
     macroquad::Window::from_config(
         Conf {
@@ -39,7 +64,10 @@ fn main() {
     backend_handle.join().unwrap();
 }
 
-fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>) {
+#[instrument(skip_all, level = "trace")]
+async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>) {
+    trace!("Starting backend");
+
     let path = PathBuf::from(args().nth(1).expect("Provide path to image"));
     let mut path = path.as_path();
 
@@ -51,8 +79,10 @@ fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>) {
         .to_string();
 
     data_sender
-        .send((Command::Next, name, img_from_path(path).unwrap()))
+        .send((Command::Next, name, img_from_path(path).expect("Path should be valid image")))
         .unwrap();
+
+    trace!("Sent first image");
 
     let files: Vec<_> = path
         .parent()
@@ -65,7 +95,11 @@ fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>) {
 
     let mut index = files.iter().position(|p| p == &path).unwrap();
 
+    trace!("Indexed folder");
+
     'commands: for command in command_receiver.iter() {
+        trace!("New command");
+
         let start = Instant::now();
 
         let data = loop {
@@ -76,13 +110,12 @@ fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>) {
 
             #[cfg(not(feature = "bench"))]
             if command_receiver.len() > 0 {
-                println!("Overlooping backend");
+                trace!("Overlooping backend");
                 continue 'commands;
             }
 
             path = &files[index];
 
-            // let data = read(path).unwrap();
             if let Ok(data) = img_from_path(path) {
                 break data;
             }
@@ -90,7 +123,7 @@ fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>) {
 
         let mbs = data.as_raw().len() as f64 / 1024.0 / 1024.0;
         let elapsed = start.elapsed().as_secs_f64();
-        println!(
+        trace!(
             "{elapsed:7.4} - loading of {mbs:4.1}mb = {:8.4}mb/s",
             mbs / elapsed
         );
@@ -106,19 +139,22 @@ fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>) {
             Err(TrySendError::Disconnected(_)) => break,
             err => err.unwrap(),
         }
+
+        trace!("Command processed");
     }
 }
 
+#[instrument(skip_all, level = "trace")]
 async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
     let mut texture = Texture2D::empty();
 
-    // Benchmark
     #[cfg(feature = "bench")]
     let mut k = 0;
     #[cfg(feature = "bench")]
     let bench_start = Instant::now();
 
     let mut instant = Instant::now();
+    let mut loop_trace = 3;
 
     #[cfg(feature = "bench")]
     for _ in 0..BENCH_STEPS {
@@ -126,6 +162,10 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
     }
 
     loop {
+        if loop_trace > 0 {
+            trace!("Loop started");
+        }
+
         if is_key_down(KeyCode::Escape) || is_mouse_button_down(MouseButton::Left) {
             break;
         }
@@ -140,6 +180,8 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
 
         match receiver.try_recv_last() {
             Ok((_prev_command, _name, bytes)) => {
+                loop_trace = 3;
+
                 texture = from_raw_image(&bytes);
 
                 let (dw, dh) = display_size();
@@ -150,39 +192,21 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
 
                 let elapsed = instant.elapsed().as_secs_f64();
                 instant = Instant::now();
-                println!("{elapsed:7.4} - loop\n");
+                trace!("{elapsed:7.4} - loop");
 
                 #[cfg(feature = "bench")]
                 {
                     k += 1;
-                    println!("Bench {k}/{BENCH_STEPS}");
+                    trace!("Bench {k}/{BENCH_STEPS}");
                     if k == BENCH_STEPS {
                         let bench_elapsed = bench_start.elapsed().as_secs_f64();
-                        println!(
+                        trace!(
                             "Bench done in {bench_elapsed} s, {} s/image",
                             bench_elapsed / BENCH_STEPS as f64
                         );
                         break;
                     }
                 }
-
-                // println!("{:?}, {}", &prev_command, bytes.len());
-                // if let Some(new_texture) = from_file(&bytes[..]) {
-                //     texture = new_texture;
-
-                //     // println!("Set texture");
-                //     command_sender.send(Command::Next).unwrap();
-
-                //     let elapsed = instant.elapsed().as_secs_f64();
-                //     println!("Loop took {elapsed:.7}ms");
-                //     instant = Instant::now();
-
-                //     k += 1;
-                //     if k == 200 {break;}
-                // } else {
-                //     command_sender.send(prev_command).unwrap();
-                //     // println!("Skip file");
-                // }
             }
             Err(TryRecvError::Disconnected) => {
                 break;
@@ -203,6 +227,10 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
             },
         );
 
+        if loop_trace > 0 {
+            trace!("Loop ended");
+            loop_trace -= 1;
+        }
         next_frame().await
     }
 }
@@ -212,6 +240,7 @@ pub trait TryRecvLast<T> {
 }
 
 impl<T> TryRecvLast<T> for Receiver<T> {
+    #[cfg(not(feature = "bench"))]
     fn try_recv_last(&self) -> Result<T, TryRecvError> {
         let mut res = self.try_recv();
         if matches!(res, Err(_)) {
@@ -220,13 +249,18 @@ impl<T> TryRecvLast<T> for Receiver<T> {
         loop {
             match self.try_recv() {
                 ok @ Ok(_) => {
-                    println!("Overlooping frontend");
+                    trace!("Overlooping frontend");
                     res = ok
                 }
                 Err(TryRecvError::Empty) => break res,
                 err => break err,
             }
         }
+    }
+
+    #[cfg(feature = "bench")]
+    fn try_recv_last(&self) -> Result<T, TryRecvError> {
+        self.try_recv()
     }
 }
 
@@ -245,12 +279,6 @@ where
         .spawn(f)
         .expect("failed to spawn thread")
 }
-
-#[cfg(feature = "bench")]
-use konst::{primitive::parse_usize, result::unwrap_ctx};
-
-#[cfg(feature = "bench")]
-const BENCH_STEPS: usize = unwrap_ctx!(parse_usize(env!("BENCH_STEPS")));
 
 pub fn fit_texture(dest_size: Vec2, texture: &Texture2D) -> (Vec2, Vec2) {
     // See: https://stackoverflow.com/questions/6565703/math-algorithm-fit-image-to-screen-retain-aspect-ratio
@@ -276,21 +304,18 @@ pub fn fit_texture(dest_size: Vec2, texture: &Texture2D) -> (Vec2, Vec2) {
     (vec2(xt, yt), vec2(wt, ht))
 }
 
+#[instrument(skip_all, level = "trace")]
 pub fn img_from_path(path: &Path) -> Result<Img, ImageError> {
-    image::open(path).map(DynamicImage::into_rgba8)
+    let img = image::open(path)?;
+    Ok(img.into_rgba8())
 }
 
+#[instrument(skip_all, level = "trace")]
 pub fn from_raw_image(img: &Img) -> Texture2D {
-    let start = Instant::now();
-
     let width = img.width() as u16;
     let height = img.height() as u16;
     let bytes = img.as_raw();
-    let res = Texture2D::from_rgba8(width, height, bytes);
-    let elapsed = start.elapsed().as_secs_f64();
-
-    println!("{elapsed:7.4} - from raw image");
-    res
+    Texture2D::from_rgba8(width, height, bytes)
 }
 
 pub fn from_file(bytes: &[u8]) -> Option<Texture2D> {
@@ -309,10 +334,62 @@ pub fn from_file(bytes: &[u8]) -> Option<Texture2D> {
     let res = Some(Texture2D::from_rgba8(width, height, &bytes));
     let elapsed = start.elapsed().as_secs_f64();
 
-    println!(
+    trace!(
         "{elapsed:7.4} - from file ({part1:.7}, {:.7}, {:.7})",
         part2 - part1,
         part3 - part2
     );
     res
+}
+
+#[derive(Debug)]
+pub struct Difftime {
+    epoch: AtomicU64,
+}
+
+impl Default for Difftime {
+    fn default() -> Self {
+        let epoch: u64 = unsafe { transmute(Instant::now()) };
+        Self {
+            epoch: AtomicU64::new(epoch),
+        }
+    }
+}
+
+impl From<Instant> for Difftime {
+    fn from(epoch: Instant) -> Self {
+        let epoch: u64 = unsafe { transmute(epoch) };
+        Self {
+            epoch: AtomicU64::new(epoch),
+        }
+    }
+}
+
+impl FormatTime for Difftime {
+    fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
+        let epoch: u64 = unsafe { transmute(Instant::now()) };
+        let prev_epoch = self.epoch.swap(epoch, Ordering::SeqCst);
+        let prev_epoch: Instant = unsafe { transmute(prev_epoch) };
+        let e = prev_epoch.elapsed();
+
+        let color = match e.as_secs_f64() {
+            x if x < 0.001 => Color::DarkGray.normal(),
+            x if x < 0.01 => Color::Green.normal(),
+            x if x < 0.1 => Color::LightBlue.normal(),
+            x if x < 1.0 => Color::Yellow.normal(),
+            x if x >= 1.0 => Color::Red.bold(),
+            _ => Color::Red.bold(),
+        };
+
+        write!(
+            w,
+            "{}{}{:4}.{:09}s{}{}",
+            Style::new().dimmed().suffix(),
+            color.prefix(),
+            e.as_secs(),
+            e.subsec_nanos(),
+            color.suffix(),
+            Style::new().dimmed().prefix(),
+        )
+    }
 }

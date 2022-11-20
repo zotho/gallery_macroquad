@@ -16,3 +16,11 @@ flume = "0.10.14"
 image = { version = "0.23.12" }
 
 konst = { version = "0.3.2", features = ["parsing", "iter"], optional = true }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Logs
+tracing = "0.1"
+tracing-subscriber = "0.3"
+nu-ansi-term = "0.46.0"
