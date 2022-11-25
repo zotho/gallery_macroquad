@@ -6,9 +6,11 @@ use std::{
     sync::{atomic::Ordering, Arc, Mutex},
     thread::{Builder, JoinHandle, spawn},
     time::{Instant},
-    collections::HashMap, iter,
+    iter,
+    num::NonZeroUsize,
 };
 
+use lru::LruCache;
 use type_freak::{KVListType, kvlist::KVValueAt};
 use portable_atomic::AtomicU128;
 use flume::{Receiver, Sender, TryRecvError, TrySendError};
@@ -26,6 +28,8 @@ pub enum Command {
 
 type Img = ImageBuffer<Rgba<u8>, Vec<u8>>;
 type Data = (Command, String, Img);
+
+const CACHE_SIZE: usize = 20;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -103,15 +107,18 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
     //         *img_guard = Some(res);
     //     });
     // }
-    let n = 10;
-    for i in index.saturating_sub(n)..index.saturating_add(n) {
+
+    for i in 0..files.len() {
+        let dist = ring_distance(files.len(), i, index);
         let path = files[i].clone();
         let img = images[i].clone();
-        spawn(move || {
-            let mut img_guard = img.lock().unwrap();
-            let res = img_from_path(&path);
-            *img_guard = Some(res);
-        });
+        if dist < CACHE_SIZE / 2 {
+            spawn(move || {
+                let mut img_guard = img.lock().unwrap();
+                let res = img_from_path(&path);
+                *img_guard = Some(res);
+            });
+        }
     }
 
     // std::thread::scope(|scope| {
@@ -177,13 +184,22 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
 
         // TODO: improve indexes math
         // TODO: not spawn threads here every time
-        for i in index.saturating_sub(n)..index.saturating_add(n).min(files.len()) {
-            let path = files[i].clone();
+        for i in 0..files.len() {
+            let dist = ring_distance(files.len(), i, index);
             let img = images[i].clone();
-            spawn(move || {
-                let mut img_guard = img.lock().unwrap();
-                img_guard.get_or_insert_with(|| img_from_path(&path));
-            });
+            if dist < CACHE_SIZE / 2 {
+                let path = files[i].clone();
+                spawn(move || {
+                    if let Ok(mut img_guard) = img.try_lock() {
+                        img_guard.get_or_insert_with(|| img_from_path(&path));
+                    }
+                });
+            } else {
+                // TODO: maybe remember error here?
+                if let Ok(mut img_guard) = img.try_lock() {
+                    img_guard.take();
+                }
+            }
         }
 
         trace!("Command processed");
@@ -194,7 +210,7 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
 #[instrument(skip_all, level = "trace")]
 async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
     // TODO: clear this cache
-    let mut texture_cache = HashMap::new();
+    let mut texture_cache = LruCache::new(NonZeroUsize::new(CACHE_SIZE).unwrap());
 
     let mut texture = Texture2D::empty();
 
@@ -232,7 +248,7 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
             Ok((_prev_command, name, bytes)) => {
                 loop_trace = 3;
 
-                texture = texture_cache.entry(name).or_insert_with(|| {
+                texture = texture_cache.get_or_insert(name, || {
                     from_raw_image(&bytes)
                 }).clone();
 
@@ -333,6 +349,13 @@ pub fn file_name(path: &Path) -> String {
         .to_str()
         .unwrap_or_default()
         .to_string()
+}
+
+pub fn ring_distance(ring_size: usize, a: usize, b: usize) -> usize {
+    let (min, max) = (a.min(b), a.max(b));
+    let first = max - min;
+    let second = min + ring_size - max;
+    first.min(second)
 }
 
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {

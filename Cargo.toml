@@ -14,7 +14,9 @@ macroquad = { path = "./macroquad", default-features = false, features = [] }
 flume = "0.10.14"
 
 image = { version = "0.23.12" }
+lru = "0.8.1"
 
+# bench
 konst = { version = "0.3.2", features = ["parsing", "iter"], optional = true }
 
 # Async
