@@ -19,6 +19,7 @@ konst = { version = "0.3.2", features = ["parsing", "iter"], optional = true }
 
 # Async
 tokio = { version = "1", features = ["full"] }
+futures = "0.3.25"
 
 # Logs
 tracing = "0.1"

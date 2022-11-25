@@ -6,21 +6,17 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     thread::{Builder, JoinHandle},
     time::Instant,
+    iter,
+    io::ErrorKind,
+    collections::HashMap,
 };
 
 use flume::{Receiver, Sender, TryRecvError, TrySendError};
 use image::{ImageBuffer, ImageError, Rgba};
 use macroquad::prelude::*;
-
 use nu_ansi_term::{Color, Style};
 use tracing::{instrument, trace, warn, Level};
 use tracing_subscriber::fmt::{format::{Writer, FmtSpan}, time::FormatTime};
-
-#[cfg(feature = "bench")]
-use konst::{primitive::parse_usize, result::unwrap_ctx};
-
-#[cfg(feature = "bench")]
-const BENCH_STEPS: usize = unwrap_ctx!(parse_usize(env!("BENCH_STEPS")));
 
 #[derive(Debug)]
 pub enum Command {
@@ -42,13 +38,14 @@ fn main() {
 
     let (command_sender, command_receiver) = channel();
     let (data_sender, data_receiver) = channel();
+    // TODO: use tokio::sync::watch::channel() somehow
 
     let backend_handle = spawn_named("backend".to_string(), move || {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(async { backend(data_sender, command_receiver).await });
+            .block_on(backend(data_sender, command_receiver));
     });
     macroquad::Window::from_config(
         Conf {
@@ -97,6 +94,21 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
 
     trace!("Indexed folder");
 
+    // TODO: use async structure to gather cache
+    // FIXME: will use a lot of memory
+    let mut images = Vec::with_capacity(files.len());
+    images.extend(iter::from_fn(|| Some(Err(ImageError::IoError(ErrorKind::NotFound.into())))).take(images.capacity()));
+
+    std::thread::scope(|scope| {
+        for (path, img) in files.iter().zip(images.iter_mut()) {
+            scope.spawn(|| {
+                *img = img_from_path(path);
+            });
+        }
+    });
+    trace!("Images done files={} images={}", files.len(), images.len());
+
+    #[cfg_attr(feature = "bench", allow(unused_labels))]
     'commands: for command in command_receiver.iter() {
         trace!("New command");
 
@@ -116,8 +128,11 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
 
             path = &files[index];
 
-            if let Ok(data) = img_from_path(path) {
-                break data;
+            // let result = img_from_path(path);
+            let result = &images[index];
+
+            if let Ok(data) = result {
+                break data.clone();
             }
         };
 
@@ -142,10 +157,13 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
 
         trace!("Command processed");
     }
+    trace!("End of loop!");
 }
 
 #[instrument(skip_all, level = "trace")]
 async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
+    let mut texture_cache = HashMap::new();
+
     let mut texture = Texture2D::empty();
 
     #[cfg(feature = "bench")]
@@ -179,10 +197,16 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
         let dest_size = Vec2::new(screen_width(), screen_height());
 
         match receiver.try_recv_last() {
-            Ok((_prev_command, _name, bytes)) => {
+            Ok((_prev_command, name, bytes)) => {
                 loop_trace = 3;
 
-                texture = from_raw_image(&bytes);
+                texture = texture_cache.entry(name).or_insert_with(|| {
+                    from_raw_image(&bytes)
+                }).clone();
+                trace!("Inserted texture from cache. Cache size: {}", texture_cache.len());
+
+                // texture = from_raw_image(&bytes);
+
 
                 let (dw, dh) = display_size();
                 if dw != 0.0 && dh != 0.0 {
@@ -209,6 +233,7 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
                 }
             }
             Err(TryRecvError::Disconnected) => {
+                trace!("Disconnected");
                 break;
             }
             _ => {}
@@ -234,6 +259,12 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
         next_frame().await
     }
 }
+
+#[cfg(feature = "bench")]
+use konst::{primitive::parse_usize, result::unwrap_ctx};
+
+#[cfg(feature = "bench")]
+const BENCH_STEPS: usize = unwrap_ctx!(parse_usize(env!("BENCH_STEPS")));
 
 pub trait TryRecvLast<T> {
     fn try_recv_last(&self) -> Result<T, TryRecvError>;
@@ -381,13 +412,29 @@ impl FormatTime for Difftime {
             _ => Color::Red.bold(),
         };
 
+        let convert = |s: &mut String| {
+            for byte in unsafe {s.as_bytes_mut()} {
+                match *byte {
+                    b' ' => (),
+                    b'0' => *byte = b'_',
+                    _ => break,
+                }
+            }
+        };
+
+        let mut as_secs = format!("{:2}", e.as_secs());
+        convert(&mut as_secs);
+
+        let mut subsec_nanos = format!("{:09}", e.subsec_nanos());
+        convert(&mut subsec_nanos);
+
         write!(
             w,
-            "{}{}{:4}.{:09}s{}{}",
+            "{}{}{:2}.{:09}s{}{}",
             Style::new().dimmed().suffix(),
             color.prefix(),
-            e.as_secs(),
-            e.subsec_nanos(),
+            as_secs,
+            subsec_nanos,
             color.suffix(),
             Style::new().dimmed().prefix(),
         )
