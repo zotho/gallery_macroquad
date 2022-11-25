@@ -11,8 +11,8 @@ use std::{
     collections::HashMap,
 };
 
-use type_freak::{KVListType, kvlist::KVValueAt, counter::{Current, Next}};
-use portable_atomic::{AtomicU128, AtomicU64};
+use type_freak::{KVListType, kvlist::KVValueAt};
+use portable_atomic::AtomicU128;
 use flume::{Receiver, Sender, TryRecvError, TrySendError};
 use image::{ImageBuffer, ImageError, Rgba};
 use macroquad::prelude::*;
@@ -375,45 +375,38 @@ pub fn from_file(bytes: &[u8]) -> Option<Texture2D> {
     res
 }
 
-type SizeOfInstant = [(); size_of::<Instant>()];
-
 type SizeToRawTMapping = KVListType![([(); 8], u64), ([(); 16], u128)];
+type SizeOfInstant = [(); size_of::<Instant>()];
 type RawTIdx<Idx> = KVValueAt<SizeToRawTMapping, SizeOfInstant, Idx>;
-
-type SizeToAtomicTMapping = KVListType![([(); 8], AtomicU64), ([(); 16], AtomicU128)];
-type AtomicTIdx<Idx> = KVValueAt<SizeToAtomicTMapping, SizeOfInstant, Idx>;
-
-type RawT = RawTIdx<Next<Current>>;
-type AtomicT = AtomicTIdx<Next<Current>>;
 
 #[derive(Debug)]
 pub struct Difftime {
-    epoch: AtomicT,
+    epoch: AtomicU128,
 }
 
 impl Default for Difftime {
     fn default() -> Self {
-        let epoch: RawT = unsafe { transmute(Instant::now()) };
+        let epoch: RawTIdx<_> = unsafe { transmute(Instant::now()) };
         Self {
-            epoch: AtomicT::new(epoch),
+            epoch: AtomicU128::new(epoch as _),
         }
     }
 }
 
 impl From<Instant> for Difftime {
     fn from(epoch: Instant) -> Self {
-        let epoch: RawT = unsafe { transmute(epoch) };
+        let epoch: RawTIdx<_> = unsafe { transmute(epoch) };
         Self {
-            epoch: AtomicT::new(epoch),
+            epoch: AtomicU128::new(epoch as _),
         }
     }
 }
 
 impl FormatTime for Difftime {
     fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
-        let epoch: RawT = unsafe { transmute(Instant::now()) };
-        let prev_epoch = self.epoch.swap(epoch, Ordering::SeqCst);
-        let prev_epoch: Instant = unsafe { transmute(prev_epoch) };
+        let epoch: RawTIdx<_> = unsafe { transmute(Instant::now()) };
+        let prev_epoch = self.epoch.swap(epoch as _, Ordering::SeqCst);
+        let prev_epoch: Instant = unsafe { transmute(prev_epoch as RawTIdx<_>) };
         let e = prev_epoch.elapsed();
 
         let color = match e.as_secs_f64() {
