@@ -25,3 +25,7 @@ futures = "0.3.25"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 nu-ansi-term = "0.46.0"
+portable-atomic = "0.3"
+
+# type-freak = "0.2.0"
+type-freak = { path = "./rust-type-freak" }
