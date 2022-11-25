@@ -3,12 +3,10 @@ use std::{
     fmt,
     mem::{transmute, size_of},
     path::{Path, PathBuf},
-    sync::atomic::Ordering,
-    thread::{Builder, JoinHandle},
-    time::Instant,
-    iter,
-    io::ErrorKind,
-    collections::HashMap,
+    sync::{atomic::Ordering, Arc, Mutex},
+    thread::{Builder, JoinHandle, spawn},
+    time::{Instant},
+    collections::HashMap, iter,
 };
 
 use type_freak::{KVListType, kvlist::KVValueAt};
@@ -70,12 +68,7 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
     let path = PathBuf::from(args().nth(1).expect("Provide path to image"));
     let mut path = path.as_path();
 
-    let name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_str()
-        .unwrap_or_default()
-        .to_string();
+    let name = file_name(path);
 
     data_sender
         .send((Command::Next, name, img_from_path(path).expect("Path should be valid image")))
@@ -97,18 +90,38 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
     trace!("Indexed folder");
 
     // TODO: use async structure to gather cache
-    // FIXME: will use a lot of memory
+    // TODO: clear this cache
     let mut images = Vec::with_capacity(files.len());
-    images.extend(iter::from_fn(|| Some(Err(ImageError::IoError(ErrorKind::NotFound.into())))).take(images.capacity()));
+    images.extend(iter::from_fn(|| Some(Arc::new(Mutex::new(None)))).take(images.capacity()));
 
-    std::thread::scope(|scope| {
-        for (path, img) in files.iter().zip(images.iter_mut()) {
-            scope.spawn(|| {
-                *img = img_from_path(path);
-            });
-        }
-    });
-    trace!("Images done files={} images={}", files.len(), images.len());
+    assert_eq!(files.len(), images.len());
+    // for (path, img) in files.iter().cloned().zip(images.iter()) {
+    //     let img = img.clone();
+    //     spawn(move || {
+    //         let mut img_guard = img.lock().unwrap();
+    //         let res = img_from_path(&path);
+    //         *img_guard = Some(res);
+    //     });
+    // }
+    let n = 10;
+    for i in index.saturating_sub(n)..index.saturating_add(n) {
+        let path = files[i].clone();
+        let img = images[i].clone();
+        spawn(move || {
+            let mut img_guard = img.lock().unwrap();
+            let res = img_from_path(&path);
+            *img_guard = Some(res);
+        });
+    }
+
+    // std::thread::scope(|scope| {
+    //     for (path, img) in files.iter().zip(images.iter_mut()) {
+    //         scope.spawn(|| {
+    //             *img = img_from_path(path);
+    //         });
+    //     }
+    // });
+    // trace!("Images done files.len()={} images.len()={}", files.len(), images.len());
 
     #[cfg_attr(feature = "bench", allow(unused_labels))]
     'commands: for command in command_receiver.iter() {
@@ -116,6 +129,7 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
 
         let start = Instant::now();
 
+        let starting_index = index;
         let data = loop {
             index = match command {
                 Command::Next => index + 1,
@@ -131,11 +145,20 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
             path = &files[index];
 
             // let result = img_from_path(path);
-            let result = &images[index];
+
+            // let result = &images[index];
+
+            let mut img_guard = images[index].lock().unwrap();
+            let result = img_guard.get_or_insert_with(|| {
+                // FIXME: we should almost never be here
+                // panic!();
+                img_from_path(path)
+            });
 
             if let Ok(data) = result {
                 break data.clone();
             }
+            assert_ne!(index, starting_index, "No files to show");
         };
 
         let mbs = data.as_raw().len() as f64 / 1024.0 / 1024.0;
@@ -145,16 +168,22 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
             mbs / elapsed
         );
 
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or_default()
-            .to_string();
+        let name = file_name(path);
 
         match data_sender.try_send((command, name, data)) {
             Err(TrySendError::Disconnected(_)) => break,
             err => err.unwrap(),
+        }
+
+        // TODO: improve indexes math
+        // TODO: not spawn threads here every time
+        for i in index.saturating_sub(n)..index.saturating_add(n).min(files.len()) {
+            let path = files[i].clone();
+            let img = images[i].clone();
+            spawn(move || {
+                let mut img_guard = img.lock().unwrap();
+                img_guard.get_or_insert_with(|| img_from_path(&path));
+            });
         }
 
         trace!("Command processed");
@@ -164,6 +193,7 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
 
 #[instrument(skip_all, level = "trace")]
 async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
+    // TODO: clear this cache
     let mut texture_cache = HashMap::new();
 
     let mut texture = Texture2D::empty();
@@ -205,7 +235,6 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
                 texture = texture_cache.entry(name).or_insert_with(|| {
                     from_raw_image(&bytes)
                 }).clone();
-                trace!("Inserted texture from cache. Cache size: {}", texture_cache.len());
 
                 // texture = from_raw_image(&bytes);
 
@@ -297,6 +326,15 @@ impl<T> TryRecvLast<T> for Receiver<T> {
     }
 }
 
+pub fn file_name(path: &Path) -> String {
+    path
+        .file_name()
+        .unwrap_or_default()
+        .to_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     flume::unbounded()
 }
@@ -339,10 +377,14 @@ pub fn fit_texture(dest_size: Vec2, texture: &Texture2D) -> (Vec2, Vec2) {
 
 #[instrument(skip_all, level = "trace")]
 pub fn img_from_path(path: &Path) -> Result<Img, ImageError> {
+    // trace!("Getting image from path {:?}", path);
     let img = image::open(path)?;
-    Ok(img.into_rgba8())
+    let img = img.into_rgba8();
+    // trace!("Ready image from path {:?} with len {}", path, img.len());
+    Ok(img)
 }
 
+// Should be called only from macroquad thread
 #[instrument(skip_all, level = "trace")]
 pub fn from_raw_image(img: &Img) -> Texture2D {
     let width = img.width() as u16;
