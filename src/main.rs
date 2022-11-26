@@ -1,25 +1,27 @@
 use std::{
     env::args,
-    fmt,
-    mem::{transmute, size_of},
-    path::{Path, PathBuf},
-    sync::{atomic::Ordering, Arc, Mutex},
-    thread::{Builder, JoinHandle, spawn},
-    time::{Instant},
-    iter,
+    fmt, iter,
+    mem::{size_of, transmute},
     num::NonZeroUsize,
     ops::Deref,
+    path::{Path, PathBuf},
+    sync::{atomic::Ordering, Arc, Mutex},
+    thread::{spawn, Builder, JoinHandle},
+    time::Instant,
 };
 
-use lru::LruCache;
-use type_freak::{KVListType, kvlist::KVValueAt};
-use portable_atomic::AtomicU128;
 use flume::{Receiver, Sender, TryRecvError, TrySendError};
 use image::{ImageBuffer, ImageError, Rgba};
+use lru::LruCache;
 use macroquad::prelude::*;
 use nu_ansi_term::{Color, Style};
+use portable_atomic::AtomicU128;
 use tracing::{instrument, trace, warn, Level};
-use tracing_subscriber::fmt::{format::{Writer, FmtSpan}, time::FormatTime};
+use tracing_subscriber::fmt::{
+    format::{FmtSpan, Writer},
+    time::FormatTime,
+};
+use type_freak::{kvlist::KVValueAt, KVListType};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -83,7 +85,11 @@ async fn backend(data_sender: Sender<Data>, command_receiver: Receiver<Command>)
     let name = file_name(path);
 
     data_sender
-        .send((Command::Next, name, img_from_path(path).expect("Path should be valid image")))
+        .send((
+            Command::Next,
+            name,
+            img_from_path(path).expect("Path should be valid image"),
+        ))
         .unwrap();
 
     trace!("Sent first image");
@@ -256,9 +262,10 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
             Ok((_prev_command, name, bytes)) => {
                 loop_trace = 3;
 
-                texture = texture_cache.get_or_insert(name, || {
-                    from_raw_image(&bytes)
-                }).deref().clone();
+                texture = texture_cache
+                    .get_or_insert(name, || from_raw_image(&bytes))
+                    .deref()
+                    .clone();
 
                 // texture = from_raw_image(&bytes);
 
@@ -350,8 +357,7 @@ impl<T> TryRecvLast<T> for Receiver<T> {
 }
 
 pub fn file_name(path: &Path) -> String {
-    path
-        .file_name()
+    path.file_name()
         .unwrap_or_default()
         .to_str()
         .unwrap_or_default()
@@ -428,7 +434,7 @@ pub struct SafeTexture2D(pub Texture2D);
 
 impl Deref for SafeTexture2D {
     type Target = Texture2D;
-    
+
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -508,7 +514,7 @@ impl FormatTime for Difftime {
         };
 
         let convert = |s: &mut String| {
-            for byte in unsafe {s.as_bytes_mut()} {
+            for byte in unsafe { s.as_bytes_mut() } {
                 match *byte {
                     b' ' => (),
                     b'0' => *byte = b'_',
