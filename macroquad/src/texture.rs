@@ -527,7 +527,7 @@ impl Texture2D {
         let texture = miniquad::Texture::from_rgba8(&mut ctx.quad_context, width, height, bytes);
         let texture = Texture2D { texture };
 
-        ctx.texture_batcher.add_unbatched(texture);
+        // ctx.texture_batcher.add_unbatched(texture);
 
         texture
     }
@@ -634,6 +634,7 @@ impl Batcher {
     }
 
     pub fn add_unbatched(&mut self, texture: Texture2D) {
+        dbg!(self.unbatched.len());
         self.unbatched.push(texture);
     }
 

@@ -8,6 +8,7 @@ use std::{
     time::{Instant},
     iter,
     num::NonZeroUsize,
+    ops::Deref,
 };
 
 use lru::LruCache;
@@ -19,6 +20,13 @@ use macroquad::prelude::*;
 use nu_ansi_term::{Color, Style};
 use tracing::{instrument, trace, warn, Level};
 use tracing_subscriber::fmt::{format::{Writer, FmtSpan}, time::FormatTime};
+
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[derive(Debug)]
 pub enum Command {
@@ -250,16 +258,15 @@ async fn frontend(receiver: Receiver<Data>, command_sender: Sender<Command>) {
 
                 texture = texture_cache.get_or_insert(name, || {
                     from_raw_image(&bytes)
-                }).clone();
+                }).deref().clone();
 
                 // texture = from_raw_image(&bytes);
 
-
-                let (dw, dh) = display_size();
-                if dw != 0.0 && dh != 0.0 {
-                    let (_, target_size) = fit_texture(vec2(dw, dh - 0.0), &texture);
-                    request_new_screen_size(target_size.x, target_size.y);
-                }
+                // let (dw, dh) = display_size();
+                // if dw != 0.0 && dh != 0.0 {
+                //     let (_, target_size) = fit_texture(vec2(dw, dh - 0.0), &texture);
+                //     request_new_screen_size(target_size.x, target_size.y);
+                // }
 
                 let elapsed = instant.elapsed().as_secs_f64();
                 instant = Instant::now();
@@ -409,11 +416,28 @@ pub fn img_from_path(path: &Path) -> Result<Img, ImageError> {
 
 // Should be called only from macroquad thread
 #[instrument(skip_all, level = "trace")]
-pub fn from_raw_image(img: &Img) -> Texture2D {
+pub fn from_raw_image(img: &Img) -> SafeTexture2D {
     let width = img.width() as u16;
     let height = img.height() as u16;
     let bytes = img.as_raw();
-    Texture2D::from_rgba8(width, height, bytes)
+    SafeTexture2D(Texture2D::from_rgba8(width, height, bytes))
+}
+
+#[derive(Clone)]
+pub struct SafeTexture2D(pub Texture2D);
+
+impl Deref for SafeTexture2D {
+    type Target = Texture2D;
+    
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for SafeTexture2D {
+    fn drop(&mut self) {
+        self.delete();
+    }
 }
 
 pub fn from_file(bytes: &[u8]) -> Option<Texture2D> {

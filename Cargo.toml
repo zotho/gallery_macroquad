@@ -31,3 +31,6 @@ portable-atomic = "0.3"
 
 # type-freak = "0.2.0"
 type-freak = { path = "./rust-type-freak" }
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.5"
